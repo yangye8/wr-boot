@@ -1,0 +1,729 @@
+/* shell.c - minimal debug shell for boot loader */
+#include <wrboot.h>
+#include <stdint.h>
+#include "ctype.h"
+
+extern void * memcpy (void *dest, void * src, unsigned int length);
+extern void * memset(void * p, unsigned int v, unsigned int length);
+extern int strcmp(const char * s1, const char * s2);
+extern unsigned long strlen (const char * s); 
+
+struct shell_cmd {
+    const char * name;
+    const char * help;
+    const char * usage;
+    int (*handler)(int argc, char * argv[]);
+};
+
+
+#define ETX 0x3  /* break, Ctrl + C */
+#define BS  0x8  /* backspace, Ctrl + H */
+
+/* shell command name max length */
+
+#define SHELL_CMD_NAME_MAX_LEN 10
+
+/* shell buffer length */
+
+#define SHELL_CMD_LEN 256
+
+static char shellBuffer[SHELL_CMD_LEN];
+static char shellBufferAt[SHELL_CMD_LEN];
+static int shellCounter;
+static int shellCounterAt;
+static int shellCmdNameMaxLen = 0;
+
+static int shellParseAndExecute(char * cmdString);
+
+/* maximum supported shell commands */
+
+#define MAX_SHELL_CMD 32
+static const struct shell_cmd * __shell_cmds[MAX_SHELL_CMD];
+
+/* These are shell built-in commands, no configuration options for built-in command */
+
+static int help(int argc, char * argv[]);
+static int at(int argc, char * argv[]);
+static int hexdump(int argc, char * argv[]);
+
+const static struct shell_cmd cmd_help = {
+    .name =    "help",
+    .help =    "print help message",
+    .usage =   "help <cmd> - print command usage, if paramter <cmd> is null\n"\
+               "             it will show the help messages of all the registered commands\n",
+    .handler = help
+};
+
+const static struct shell_cmd cmd_at = {
+    .name =    "@",
+    .help =    "boot kernel using pre-defined scripts",
+    .usage =   "boot kernel using pre-defined scripts\n" \
+                   "the pre-defined script is usually set through _WRS_CONFIG_BOOT_SCRIPT\n",
+    .handler = at
+};
+
+const static struct shell_cmd cmd_hexdump = {
+    .name =    "d",
+    .help =    "display address content",
+    .usage =   "d  <addr>,<num>,<width>",
+    .handler = hexdump
+};
+
+/*******************************************************************************
+*
+* shellGetChar - get a character from underlying device
+*
+* This routine gets a character from underlying device and puts it into
+* shell's internal buffer.
+*
+* RETURNS: 1, if end of line(\n, \r or \n\r) or break(ctrl + c) is received
+*          0, otherwise
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int shellGetChar(void)
+    {
+    char tmp = (char)getc();
+
+    switch (tmp)
+        {
+        case '\n':
+        case '\r':
+            (void)putc('\r');
+            (void)putc('\n');
+            return 1;
+        case BS:
+            if (shellCounter > 0)
+                {
+                shellCounter--;
+                shellBuffer[shellCounter] = 0;
+                (void)putc('\b');
+                (void)putc(' ');
+                (void)putc('\b');
+                }
+            return 0;
+        case ETX:
+            shellCounter = 0;
+            shellBuffer[0] = '\0';
+            (void)putc('\n');
+            (void)putc('\r');
+            return 1;
+        default:
+            if (shellCounter >= (SHELL_CMD_LEN - 1))
+                return 0;
+            shellBuffer[shellCounter] = tmp;
+            shellCounter++;
+            /* coverity[negative_returns] */
+            (void)putc(tmp);
+            return 0;
+        }
+    return 0;
+    }
+
+/*******************************************************************************
+*
+* shellGetLine - read a line
+*
+* This routine reads a line into shell's internal buffer.
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static void shellGetLine(void)
+    {
+    while (shellGetChar() != 1)
+        ;
+    }
+
+/*******************************************************************************
+*
+* shellExec - execute shell command
+*
+* This routine executes shell command according to the input parameter.
+*
+* RETURNS: 0 on the command executed correctly, -1 otherwise
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int shellExec
+    (
+    int argc,
+    char *argv[]
+    )
+    {
+    int i, ret;
+
+    for (i = 0; i < MAX_SHELL_CMD; i++)
+        {
+        const struct shell_cmd *c = __shell_cmds[i];
+        if (c && !strcmp(argv[0], c->name))
+            {
+            ret = c->handler(argc, argv);
+            if (ret)
+                return -1;
+            else
+                break;
+            }
+        }
+    if (i == MAX_SHELL_CMD)
+        {
+        (void)printk("invalid command %s\n", argv[0]);
+        return -1;
+        }
+    return 0;
+    }
+
+/*******************************************************************************
+*
+* shellParseAndExecute - parse and execute shell command
+*
+* This routine parses the line read and executes shell command accordingly.
+*
+* RETURNS: 0 is all commands are executed correctly, -1 otherwise
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int shellParseAndExecute
+    (
+    char * cmdString
+    )
+    {
+    int argc;
+    char *cmd, *t, *s, *ss;
+    char *argv[32];
+
+    s = cmdString;
+    while ((*s != '\0') && (isspace(*s) || (*s == ';')))
+        s++;
+
+    if (*s == '\0')
+        return 0;
+
+    for (;;)
+        {
+        ss = s;
+        while ((*s != '\0') && (*s != ';'))
+            {
+            if (*s == '"')
+                {
+                ++s;
+                while ((*s != '\0') && (*s != '"'))
+                    s++;
+                if (*s == '\0')
+                    {
+                    (void)printk("unbalanced string quote\n");
+                    return -1;
+                    }
+                }
+            s++;
+            }
+
+        if (*s != '\0')
+            *s++ = '\0';
+
+        cmd = ss;
+        for (argc = 0;;)
+            {
+            while ((*cmd != '\0') && (cmd < s) && isspace(*cmd))
+                cmd++;
+
+            if ((*cmd == '\0') || cmd >= s)
+                break;
+
+            t = cmd;
+            while ((*cmd != '\0') && !isspace(*cmd) && (cmd < s))
+                {
+                if (*cmd == '"')
+                    {
+                    cmd++;
+                    while ((*cmd != '\0') && (*cmd != '"'))
+                        cmd++;
+                    if (*cmd == '\0')
+                        {
+                        (void)printk("unbalanced string quote\n");
+                        return -1;
+                        }
+                    }
+                cmd++;
+                }
+
+            if (isspace(*cmd))
+                *cmd++ = '\0';
+
+            /* remove the quote mark if needed */
+
+            if (*t == '"')
+                {
+                *t++ = ' ';
+                t[strlen(t) - 1] = '\0';
+                }
+
+            argv[argc++] = t;
+            }
+       
+        if (shellExec(argc, argv) < 0)
+            return -1;
+
+        if (*s == '\0')
+            break;
+        }
+    return 0;
+    }
+
+/*******************************************************************************
+*
+* shellMainLoopCmdRun - run shell main loop command
+*
+* This routine runs the shell main loop command
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int shellMainLoopCmdRun(void)
+    {
+    char *s;
+    
+    if (shellCounter <= 0)
+        return -1;
+
+    s = shellBuffer;
+    return shellParseAndExecute (s);
+    }
+
+/*******************************************************************************
+*
+* shellBootScriptCmdRun - run shell boot script command
+*
+* This routine runs the shell boot script command
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int shellBootScriptCmdRun(void)
+    {
+    char *s;
+    
+    if (shellCounterAt <= 0)
+        return -1;
+
+    s = shellBufferAt;
+    return shellParseAndExecute (s);
+    }
+
+/*******************************************************************************
+*
+* shellPrompt - output shell prompt
+*
+* This routine prints shell prompt
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static void shellPrompt(void)
+    {
+    (void)printk("welecom to my shell!\r\n");
+    }
+
+/*******************************************************************************
+*
+* shellInit - initialize shell buffer
+*
+* This routine initializes shell's internal buffer
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static void shellInit(void)
+    {
+    shellCounter = 0;
+    memset(shellBuffer, 0, SHELL_CMD_LEN);
+    }
+
+/*******************************************************************************
+*
+* shellMainLoop - shell main loop
+*
+* This is the shell main loop routine
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static void shellMainLoop(void)
+    {
+    for (;;)
+        {
+        shellInit();
+        shellPrompt();
+        shellGetLine();
+        (void)shellMainLoopCmdRun();
+        }
+    }
+
+/*******************************************************************************
+*
+* shellCmdRegister - register a shell command
+*
+* This routine registers a shell command
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+void shellCmdRegister
+    (
+    const struct shell_cmd * cmd
+    )
+    {
+    int i, len;
+
+    if (cmd)
+        {
+        len = strlen(cmd->name);
+        if (len > MAX_SHELL_CMD)
+            {
+            (void)printk("warnings - cmd name length exceeds maximum: %s, the allowed length is %u\n",
+                cmd->name, SHELL_CMD_NAME_MAX_LEN);
+            return;
+            }
+        if (len > shellCmdNameMaxLen)
+           shellCmdNameMaxLen = len;
+
+        for (i = 0; i < MAX_SHELL_CMD; i++)
+            {
+            if (__shell_cmds[i] == NULL)
+                {
+                __shell_cmds[i] = cmd;
+                return;
+                }
+            }
+        }
+    (void)printk("warning - shell cmd %s not registered\n",
+        cmd == NULL ? "NULL" : cmd->name);
+    }
+
+/*******************************************************************************
+*
+* hexdump - shell's built-in 'd' command
+*
+* This routine dump the memory contents
+*
+* RETURNS: 0 on success, or -1 otherwise
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int hexdump
+    (
+    int argc,
+    char * argv[]
+    )
+    {
+    int i, j;
+    char *sep, *cmd, *start, *end;
+    size_t bytes;
+
+    static char *addr = NULL;
+    static uint32_t num = 32;
+    static uint32_t width = 4;
+
+    if (argc >= 2)
+        {
+        //cmd = strtok_r(argv[1], ", ", &sep);
+        if (!cmd)
+            return 0;
+        //addr = (void *)(uintptr_t)strtoul(cmd, NULL, 16);
+       // cmd = strtok_r(NULL, ", ", &sep);
+        if (cmd)
+            //num = strtoul(cmd, NULL, 10);
+			num = 1;
+        else
+            num = 4;
+         //cmd = strtok_r(NULL, ", ", &sep);
+        if (cmd)
+            //width = strtoul(cmd, NULL, 10);
+			width = 2;
+        else
+            width = 1;
+        }
+
+    if (addr == NULL)
+        {
+        (void)(void)printk("Trying to access NULL\n");
+        return -1;
+        }
+
+    switch (width)
+        {
+        case 1:
+            break;
+        case 2:
+            if ((uintptr_t)addr & 0x1)
+                return -1;
+            break;
+        case 4:
+            if ((uintptr_t)addr & 0x3)
+                return -1;
+            break;
+        default:
+            (void)(void)printk("Accepted with: 1, 2, 4\n");
+            return -1;
+        }
+
+    bytes = num * width;
+    start  = (void *)((uintptr_t)addr &~ 15);
+    end = (void *)(uintptr_t)ROUND_UP(((uintptr_t)((char *)addr + bytes )), 16);
+    end = (char *)addr + bytes;
+    bytes = ROUND_UP((end - start), 16);
+
+    if (width == 1)
+        {
+        for (i = 0; i < bytes / 16; i++)
+            {
+            cmd = start;
+            (void)printk("0x%x: ", start);
+            for (j = 0; j < 16; j++)
+                {
+                if (start < addr || start >= end)
+                    (void)printk("   ");
+                else
+                    (void)printk("%02x ", *(uint8_t *)start);
+                start = __address_add_offset(start, 1);
+                }
+
+            for (j = 0; j < 16; j++)
+                {
+                if (cmd < addr || cmd >= end)
+                    (void)printk(" ");
+                else if (isprint(*cmd))
+                    (void)printk("%c", *cmd);
+                else
+                    (void)printk(".");
+                cmd++;
+                }
+            (void)printk("\n");
+            }
+        }
+    else if (width == 2)
+        {
+        for (i = 0; i < bytes / 16; i++)
+            {
+            cmd = start;
+            (void)printk("0x%x: ", start);
+            for (j = 0; j < 8; j++)
+                {
+                if (start < addr || start >= end)
+                    (void)printk("     ");
+                else
+                    (void)printk("%04x ", *(uint16_t *)start);
+                start = __address_add_offset(start, 2);
+                }
+
+            for (j = 0; j < 16; j++)
+                {
+                if (cmd < addr || cmd >= end)
+                    (void)printk(" ");
+                else if (isprint(*cmd))
+                    (void)printk("%c", *cmd);
+                else
+                    (void)printk(".");
+                cmd++;
+                }
+            (void)printk("\n");
+            }
+        }
+    else
+        {
+        for (i = 0; i < bytes / 16; i++)
+            {
+            cmd = start;
+            (void)printk("0x%x: ", start);
+            for (j = 0; j < 4; j++)
+                {
+                if (start < addr || start >= end)
+                    (void)printk("         ");
+                else
+                    (void)printk("%08x ", *(uint32_t *)start);
+                start = __address_add_offset(start, 4);
+                }
+
+            for (j = 0; j < 16; j++)
+                {
+                if (cmd < addr || cmd >= end)
+                    (void)printk(" ");
+                else if (isprint(*cmd))
+                    (void)printk("%c", *cmd);
+                else
+                    (void)printk(".");
+                cmd++;
+                }
+            (void)printk("\n");
+            }
+        }
+
+    addr = __address_add_offset(addr, num * width);
+    return 0;
+    }
+
+/*******************************************************************************
+*
+* help - shell's built-in help command
+*
+* This routine implements shell's built-in help command. The help command
+* is always available.
+*
+* RETURNS: 0, always
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int help
+    (
+    int argc,
+    char * argv[]
+    )
+    {
+    int i, j, len;
+    char * cmd = NULL;
+
+    if (argc >= 2)
+        cmd = argv[1];
+
+    if (!cmd)
+        {
+        for (i = 0; i < MAX_SHELL_CMD; i++)
+            {
+            if (__shell_cmds[i])
+                {
+                len = (int)strlen(__shell_cmds[i]->name);
+                j = shellCmdNameMaxLen - len;
+                while (j-- > 0)
+                   (void)putc(' ');
+
+                (void)printk("%s - %s\n", __shell_cmds[i]->name,
+                    __shell_cmds[i]->help == NULL ? "NULL" :
+                    __shell_cmds[i]->help);
+                }
+            }
+        }
+    else
+        {
+        for (i = 0; i < MAX_SHELL_CMD; i++)
+            {
+            if (__shell_cmds[i] && strcmp(cmd, __shell_cmds[i]->name) == 0)
+                {
+                if (__shell_cmds[i]->usage)
+                    (void)printk("%s\n", __shell_cmds[i]->usage);
+                break;
+                }
+            }
+        if (i >= MAX_SHELL_CMD)
+            (void)printk("Unknown command: %s\n", cmd);
+        }
+    return 0;
+    }
+
+/*******************************************************************************
+*
+* at - boot kernel using pre-defined boot script
+*
+* This routine boots kernel using pre-defined boot script
+*
+* RETURNS: this routine never returns
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+static int at
+    (
+    int argc,
+    char *argv[]
+    )
+    {
+    const char *bootscript = 0;
+    if (!bootscript)
+        {
+        (void)printk("no bootscript defined\n");
+        return -1;
+        }
+
+    shellCounterAt = strlen(bootscript);
+
+    if (shellCounterAt == 0 || bootscript[0] == '\0')
+        {
+        (void)printk("no valid shell script. break.\n");
+        return -1;
+        }
+    if (shellCounterAt >= SHELL_CMD_LEN)
+        {
+        (void)printk("bootscript too long\n");
+        return -1;
+        }
+    memcpy(shellBufferAt, bootscript, shellCounterAt);
+    shellBufferAt[shellCounterAt] = '\0';
+   
+    return shellBootScriptCmdRun();
+    }
+
+/*******************************************************************************
+*
+* usrShell - start shell
+*
+* This routine starts the debug shell. This is called from usrRoot.
+*
+* RETURNS: N/A
+*
+* ERRNO: N/A
+*
+* \NOMANUAL
+*/
+
+void usrShell(void)
+    {
+    shellCmdRegister(&cmd_help);
+    shellCmdRegister(&cmd_at);
+    shellCmdRegister(&cmd_hexdump);
+
+    shellMainLoop();
+    }

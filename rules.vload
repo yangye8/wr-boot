@@ -1,0 +1,169 @@
+ifdef	ARCH
+sinclude $(TOPDIR)/$(ARCH)_config.mk	# include architecture dependend rules
+endif
+
+ifdef	CPU
+sinclude $(TOPDIR)/cpu/$(CPU)/config.mk	# include  CPU	specific rules
+endif
+
+ifdef	VENDOR
+BOARDDIR = $(VENDOR)/$(BOARD)
+else
+BOARDDIR = $(BOARD)
+endif
+
+ifdef	BOARD
+sinclude $(TOPDIR)/board/$(BOARDDIR)/config.mk	# include board specific rules
+endif
+
+include $(TOPDIR)/boot/board/p2020rdb/config.mk
+
+#$(wildcard PATTERN)
+#	函数名称：获取匹配模式文件名函数-wildcard函数功能：列出当前目录下所有符合模式“PATTERN”格式的文件名。
+#	返回值：空格分割的、存在当前目录下的所有符合模式“PATTERN”的文件名。
+#	函数说明：“PATTERN”使用shell可识别的通配符，包括“?”（单字符）、“*”（多字符）等。i
+#	示例：
+#	$(wildcard *.c)返回值为当前目录下所有.c源文件列表。
+
+sources    := $(wildcard *.c)
+
+
+#$(patsubst PATTERN,REPLACEMENT,TEXT) 
+#	函数名称：模式替换函数—patsubst。
+#	函数功能：搜索“TEXT”中以空格分开的单词，将符合模式“PATTERN”替换为“REPLACEMENT”。
+#	参数“PATTERN”中可以使用模式通配符“%”  来代表一个单词中的若干字符。如果参数“REPLACEMENT”中也包含一个“%”，那么“REPLACEMENT”中的“%”将是“PATTERN”中的那个“%”所代表的字符串。
+#	在“PATTERN”和“REPLACEMENT”中，只有第一个“%”被作为模式字符来处理，之后出现的不再作模式字符（作为一个字符）。在参数中如果需要将第一个出现的“%”作为字符本身而不作为模式字符时，可使用反斜杠“\”进行转义处理（转义处理的机制和使用静态模式的转义一致)
+#	 返回值：替换后的新字符串。 函数说明：参数“TEXT”单词之间的多个空格在处理时被合并为一个空格，并忽略前导和结尾空格。 i
+#	示例：
+#	  $(patsubst %.c,%.o,x.c bar.c)  把字串“x.c bar.c”中以.c结尾的单词替换成以.o结尾的字符。函数的返回结果是“x.o bar.o”
+
+objects    := $(patsubst %.c, %.o, $(sources))
+
+deps       := $(patsubst %.c, %.d, $(sources))
+
+target     :=
+
+CROSS_COMPILE := powerpc-linux-gnu-
+
+#########################################################################
+
+#
+# Include the make variables (CC, etc...)
+#
+
+AS	= $(CROSS_COMPILE)as
+LD	= $(CROSS_COMPILE)ld
+CC	= $(CROSS_COMPILE)gcc
+CPP	= $(CC) -E
+AR	= $(CROSS_COMPILE)ar
+NM	= $(CROSS_COMPILE)nm
+STRIP	= $(CROSS_COMPILE)strip
+OBJCOPY = $(CROSS_COMPILE)objcopy
+OBJDUMP = $(CROSS_COMPILE)objdump
+RANLIB	= $(CROSS_COMPILE)RANLIB
+RM>->---= rm -f
+
+DBGFLAGS= -g -save-temps 
+
+OPTFLAGS= -O0 -fomit-frame-pointer -fno-stack-protector -std=c99 -fdata-sections -ffunction-sections -fno-builtin
+
+#LDSCRIPT := $(TOPDIR)/board/$(BOARDDIR)/wrboot.lds
+LDSCRIPT := $(TOPDIR)/boot/cpu/$(CPU)/link.DOTBOOTROM
+
+OBJCFLAGS := --gap-fill=0xff
+
+CPPFLAGS := $(DBGFLAGS) $(OPTFLAGS)     		\
+        -DTEXT_BASE=$(TEXT_BASE)		\
+		-I$(TOPDIR)/h				\
+		-I$(TOPDIR)/lib/libfdt/h            \
+		-I$(TOPDIE)/loader/h
+
+CFLAGS := -Wall -Wstrict-prototypes $(CPPFLAGS)
+
+
+AFLAGS_DEBUG := -Wa,-gstabs
+
+AFLAGS := $(AFLAGS_DEBUG) -D__ASSEMBLY__ $(CPPFLAGS)
+
+LDFLAGS += -X -N -T $(LDSCRIPT) -Ttext $(TEXT_BASE)  \
+	-defsym _VX_DATA_ALIGN=1  -defsym wrs_kernel_rom_size=0x000100000 \
+	-defsym RAM_LOW_ADRS=0x100000
+
+#########################################################################
+
+export CROSS_COMPILE AS LD CC CPP AR NM STRIP OBJCOPY OBJDUMP MAKE SUBDIRS
+export	TEXT_BASE CPPFLAGS CFLAGS AFLAGS
+
+#自动产生依赖，用于描述.o文件和头文件的依赖关系，比如修改头文件但是不会重新编译.o，就是没有
+#依赖关系，GCC支持通过查找C源文件中的"#include"关键字来自动推倒产生依赖关系的功能，
+#"-M选项自动寻找源文件中包含的头文件，并生成文件的依赖关系"
+#.depend: $(sources)
+#	@$(CC) -M $(sources) > $@
+#
+#sinclude .depend
+# 过时?
+
+#%.d: %.c
+#	@set -e; rm -f $@; \
+#	$(CC) -M $(CFLAGS) $< > $@.$$$$; \
+#	sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
+#	$(RM) $@.$$$$
+#sinclude $(deps)
+
+#	这一行是非常关键的，它在当前Makefile里去include另外的Makefile. 这里“另外”的Makefile是将SOURCES变量里所有.c替换成.d。 在我的例子里就是dList.d memory.d test.d debug.d. 意思就是执行到这里
+#	    的时候先去依次执行dList.d memory.d test.d debug.d. 这里的.d文件就是包含了每个.c文件自动生成的对头文件的依赖关系。这个依赖关系将由上面的%d:%c来完成。
+#
+# 到这里基本的意义弄明白了，但是让我不解的是%d: %c这个依赖的规则怎么能被执行到的？按照我的理解Makefile在执行时首先检查终极目标main是否存在，如果不存在则建立（根据main的依赖规则），如果存在在需要查看
+# main的依赖文件是否存在并且是最新的，这我的例子里就是要看test.o dList.o memory.o debug.o是否存在且最新。这样追下去是否没有%d: %c什么事啊， .d文件也应该不存在或者说是空的。尽管我们include了.d文件，但是没有依赖规则去执行它啊。后来仔细阅读了
+#Makefile文件的重建才明白了。
+
+#Makefile如果由其它文件重建（这里我的Makefile include了所有.d文件，.d也可以看成是一个Makefile），Makefile在读入所有其他makefile文件（.d）之后，首先将所读取的每个makefile（.d）作为一个目标，寻找更新它们的规则。同样
+#如果此目标不存在则根据依赖规则重新创建。在例子里其实.d文件开始并不存在，所以当Makefile在include这些.d文件时首先看.d存在不，不存在就要去寻找.d的依赖文件和规则。这里就找到了%d: %c从而创建出真正的.d文件。其实这里的关键点就是对于
+#include了理解，它是把include的文件首先当成一个目标，然后要去寻找其依赖文件和规则的，而不是我事先想象的简单的把其他文件的内容包含过来。
+#
+
+#重建内嵌隐含规则，需要使用相同的目标和依赖模式，但是命令可以不同
+
+#%.o: %.c
+#	$(CC) $(CFLAGS) -D__DEBUG__ $< -o $@
+
+#模式规则，只要目标文件是带有模式字符%的文件，模式规则的格式 %.o: %.c COMMAND
+#预定义的编译ｃ文件到ｏ文件的隐含模式规则:
+
+%.o: %.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+
+# Show help.
+# help:
+# @echo 'Generic Makefile for C/C++ Programs (gcmakefile) version 0.5'
+# @echo 'Copyright (C) 2007, 2008 whyglinux <whyglinux@hotmail.com>'
+# @echo
+# @echo 'Usage: make [TARGET]'
+# @echo 'TARGETS:'
+# @echo ' all (=make) compile and link.'
+# @echo ' NODEP=yes make without generating dependencies.'
+# @echo ' objs compile only (no linking).'
+# @echo ' tags create tags for Emacs editor.'
+# @echo ' ctags create ctags for VI editor.'
+# @echo ' clean clean objects and the executable file.'
+# @echo ' distclean clean objects, the executable and dependencies.'
+# @echo ' show display variables (for debug use only).'
+# @echo ' help print this message.'
+# @echo
+# @echo 'Report bugs to <whyglinux AT gmail DOT com>.'
+#
+# # Show variables (for debug use only.)
+# show:
+# @echo 'PROGRAM :' $(PROGRAM)
+# @echo 'SRCDIRS :' $(SRCDIRS)
+# @echo 'HEADERS :' $(HEADERS)
+# @echo 'SOURCES :' $(SOURCES)
+# @echo 'SRC_CXX :' $(SRC_CXX)
+# @echo 'OBJS :' $(OBJS)
+# @echo 'DEPS :' $(DEPS)
+# @echo 'DEPEND :' $(DEPEND)
+# @echo 'COMPILE.c :' $(COMPILE.c)
+# @echo 'COMPILE.cxx :' $(COMPILE.cxx)
+# @echo 'link.c :' $(LINK.c)
+# @echo 'link.cxx :' $(LINK.cxx)''''''''''''''''''''''''''''''''''''''''''''''''''''
