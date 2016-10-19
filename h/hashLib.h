@@ -30,7 +30,6 @@ typedef int (*HASH_FUNC) (int elements, HASH_NODE * pHNode, int arg);
 
 typedef struct hashtbl      /* HASH_TBL */
     {
-    HANDLE    handle;   /* handle management */
     HASH_KEY_CMP_FUNC keyCmpRtn;/* comparator function */
     HASH_FUNC     keyRtn;   /* hash function */
     SL_LIST *     pHashTbl; /* pointer to hash table array */

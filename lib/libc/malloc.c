@@ -48,13 +48,15 @@ void *fisrt_fit_malloc(unsigned long size)
     blockhead *newblock;
 
     size = (size+7)&~7; /* unsigned long align the size */
-
+#ifdef DBG
     printf("malloc(): size = 0x%x blockptr-%x allocated-%d\n", size,blockptr,blockptr->allocated);
-
+#endif
     while (blockptr != 0) {
         if (blockptr->allocated == 0) 
         {
+#ifdef DBG
         printf("blockptr->size = 0x%x size-%x\n", blockptr->size,size);
+#endif
             if (blockptr->size >= size) 
             {
                 blockptr->allocated=1;
